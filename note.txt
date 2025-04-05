@@ -1,0 +1,325 @@
+import sys
+import json
+import os
+import re
+import urllib.request
+import pandas as pd
+import config
+from pathlib import Path
+from time import sleep
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+
+COOKIE_FILE = "cookies.json"
+
+def save_cookies(context):
+    """Save cookies to a file."""
+    cookies = context.cookies()
+    with open(COOKIE_FILE, "w") as f:
+        json.dump(cookies, f)
+    print("Cookies saved!")
+
+def load_cookies(context):
+    """Load cookies from a file if it exists."""
+    file_path = Path(COOKIE_FILE)
+    if file_path.exists():
+        with open(COOKIE_FILE, "r") as f:
+            cookies = json.load(f)
+            context.add_cookies(cookies)
+        print("Cookies loaded!")
+    else:
+        print("No cookies found. Starting fresh session.")
+
+def slow_scroll(page, step=300, delay=1):
+    """Slowly scrolls the Google Maps search results."""
+    total_height = page.evaluate("document.body.scrollHeight")
+    current_position = 0
+    while current_position < total_height:
+        page.evaluate(f"window.scrollBy(0, {step})")
+        current_position += step
+        print(f"Scrolled to: {current_position}px")
+        sleep(delay)
+        total_height = page.evaluate("document.body.scrollHeight")
+    print("Reached the bottom of the results!")
+
+def get_all_links(html_content):
+    """Extract all place links from Google Maps search results."""
+    links_list = []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    containers = soup.find_all('div', class_='Nv2PK tH5CWc THOPZb')
+    for container in containers:
+        link = container.find('a').get('href')
+        links_list.append(link)
+    return links_list 
+
+def get_coordinates(url):
+    """Extract latitude and longitude from Google Maps URL."""
+    match = re.search(r"3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", url)
+    if match:
+        latitude, longitude = match.groups()
+        return latitude, longitude
+    return None, None
+
+def is_relevant_travel(name, address):
+    """Memeriksa apakah tempat ini merupakan layanan travel atau bukan"""
+    
+    # Kata kunci yang menunjukkan layanan travel
+    travel_keywords = ["travel", "shuttle", "daytrans", "cititrans", "xtrans", "big bird", "primajasa", "pariwisata"]
+
+    # Kata kunci yang menunjukkan layanan yang tidak relevan
+    exclude_keywords = ["ojek", "grab", "gojek", "angkot", "ojeg", "maxim"]
+
+    # Konversi nama dan alamat ke huruf kecil agar pencarian kata kunci tidak case-sensitive
+    name_lower = name.lower()
+
+
+    # Jika ada kata kunci di travel_keywords, langsung anggap relevan
+    if any(travel in name_lower for travel in travel_keywords):
+        return True  # Tetap scrap karena travel
+
+    # Jika nama atau alamat mengandung kata kunci yang harus dihindari, beri tanda False
+    if any(exclude in name_lower for exclude in exclude_keywords):
+        return False  # Data tidak relevan
+
+    # If there is no travel indication and no forbidden keywords, still scrape but consider it irrelevant.
+    return True
+
+def scrape_gmaps():
+    search_query = config.SEARCH_QUERY
+    url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}"
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context()
+        if os.path.isfile(COOKIE_FILE):
+            load_cookies(context)
+        page = context.new_page()
+        page.set_default_navigation_timeout(60000)
+        page.goto(url)
+        slow_scroll(page)
+        html_content = page.content()
+        place_links = get_all_links(html_content)
+        #banyak travel
+        print('total travel: ', len(place_links))
+
+        places = []
+        #cari data di link
+        for link in place_links:
+            print(f"Scraping: {link}")
+            place_details = get_place_details(page, link)
+
+            #travel relevan apa tidak
+            place_details["is_relevant"] = is_relevant_travel(place_details["name"], place_details["address"])
+            places.append(place_details)
+        
+        df = pd.DataFrame(places)
+        df.to_csv(f"{search_query}.csv", index=False)
+        print("Google Maps data saved to CSV!")
+        browser.close()
+
+def get_place_details(page, url):
+    """Extract details from a single place page."""
+    page.goto(url)
+    sleep(2)
+    html_content = page.content()
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    try:
+        name = soup.find('h1').text.strip()
+    except AttributeError:
+        name = ""
+
+    try:
+        rating = soup.find('span', class_='MW4etd').text.strip()
+    except AttributeError:
+        rating = ""
+
+    try:
+        address = soup.find('div', class_='Io6YTe fontBodyMedium kR99db fdkmkc').text.strip()
+    except AttributeError:
+        address = ""
+
+    try:
+        ul_element = soup.find("ul", class_="fontTitleSmall")
+        li_element = ul_element.find("li", class_="G8aQO").text
+        hours_today = li_element
+    except AttributeError:
+        hours_today = ""
+
+    try:
+        website = soup.find("a", {"data-item-id": "authority"}).get('href').strip()
+    except AttributeError:
+        website = ""
+
+    try:
+        phone_element = soup.find("button", {"data-item-id": lambda x: x and x.startswith("phone:")})
+        phone =  phone_element.find("div", class_="Io6YTe fontBodyMedium kR99db fdkmkc").text.strip()
+    except AttributeError:
+        phone = ""
+
+    latitude, longitude = get_coordinates(url)
+
+    return {
+        "name": name,
+        "rating": rating,
+        "address": address,
+        "hours_today": hours_today,
+        "website": website,
+        "phone": phone,
+        "latitude": latitude,
+        "longitude": longitude,
+        "link": url
+    }
+
+
+============================================================================================================================================================================================================
+
+import sys
+import json
+import os
+import re
+import urllib.request
+import pandas as pd
+import config
+from pathlib import Path
+from time import sleep
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+
+COOKIE_FILE = "cookies.json"
+
+def save_cookies(context):
+    """Save cookies to a file."""
+    cookies = context.cookies()
+    with open(COOKIE_FILE, "w") as f:
+        json.dump(cookies, f)
+    print("Cookies saved!")
+
+def load_cookies(context):
+    """Load cookies from a file if it exists."""
+    file_path = Path(COOKIE_FILE)
+    if file_path.exists():
+        with open(COOKIE_FILE, "r") as f:
+            cookies = json.load(f)
+            context.add_cookies(cookies)
+        print("Cookies loaded!")
+    else:
+        print("No cookies found. Starting fresh session.")
+
+def slow_scroll(page, step=300, delay=1):
+    """Slowly scrolls the Google Maps search results."""
+    total_height = page.evaluate("document.body.scrollHeight")
+    current_position = 0
+    while current_position < total_height:
+        page.evaluate(f"window.scrollBy(0, {step})")
+        current_position += step
+        print(f"Scrolled to: {current_position}px")
+        sleep(delay)
+        total_height = page.evaluate("document.body.scrollHeight")
+    print("Reached the bottom of the results!")
+
+def get_all_links(html_content):
+    """Extract all place links from Google Maps search results."""
+    links_list = []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    containers = soup.find_all('div', class_='Nv2PK tH5CWc THOPZb')
+    for container in containers:
+        link = container.find('a').get('href')
+        links_list.append(link)
+    return links_list 
+
+def get_coordinates(url):
+    """Extract latitude and longitude from Google Maps URL."""
+    match = re.search(r"3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", url)
+    if match:
+        latitude, longitude = match.groups()
+        return latitude, longitude
+    return None, None
+
+
+def scrape_gmaps():
+    search_query = config.SEARCH_QUERY
+    url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}"
+    
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context()
+        if os.path.isfile(COOKIE_FILE):
+            load_cookies(context)
+        page = context.new_page()
+        page.set_default_navigation_timeout(60000)
+        page.goto(url)
+        slow_scroll(page)
+        html_content = page.content()
+        place_links = get_all_links(html_content)
+        print('total travel: ', len(place_links))
+        
+        places = []
+        #search data in link
+        for link in place_links:
+            print(f"Scraping: {link}")
+            place_details = get_place_details(page, link)
+            places.append(place_details)
+        
+        df = pd.DataFrame(places)
+        df.to_csv(f"{search_query}.csv", index=False)
+        print("Google Maps data saved to CSV!")
+        browser.close()
+
+def get_place_details(page, url):
+    """Extract details from a single place page."""
+    page.goto(url)
+    sleep(2)
+    html_content = page.content()
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    try:
+        name = soup.find('h1').text.strip()
+    except AttributeError:
+        name = ""
+
+    try:
+        rating = soup.find('span', class_='MW4etd').text.strip()
+    except AttributeError:
+        rating = ""
+
+    try:
+        address = soup.find('div', class_='Io6YTe fontBodyMedium kR99db fdkmkc').text.strip()
+    except AttributeError:
+        address = ""
+
+    try:
+        ul_element = soup.find("ul", class_="fontTitleSmall")
+        li_element = ul_element.find("li", class_="G8aQO").text
+        hours_today = li_element
+    except AttributeError:
+        hours_today = ""
+
+    try:
+        website = soup.find("a", {"data-item-id": "authority"}).get('href').strip()
+    except AttributeError:
+        website = ""
+
+    try:
+        phone_element = soup.find("button", {"data-item-id": lambda x: x and x.startswith("phone:")})
+        phone =  phone_element.find("div", class_="Io6YTe fontBodyMedium kR99db fdkmkc").text.strip()
+    except AttributeError:
+        phone = ""
+
+    latitude, longitude = get_coordinates(url)
+
+    return {
+        "name": name,
+        "rating": rating,
+        "address": address,
+        "hours_today": hours_today,
+        "website": website,
+        "phone": phone,
+        "latitude": latitude,
+        "longitude": longitude,
+        "link": url
+    }
+
+
+
+
